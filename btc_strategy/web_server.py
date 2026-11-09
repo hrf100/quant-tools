@@ -73,6 +73,22 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
     .score-table { width: 100%; font-size: 0.8rem; margin-top: 8px; }
     .score-table td { padding: 4px 0; border: none; font-family: sans-serif; }
     .score-val { font-family: monospace; font-weight: 600; text-align: right; }
+
+    /* 核心连接状态矩阵样式 */
+    .conn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .conn-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 14px; position: relative; transition: border-color 0.2s; }
+    .conn-card:hover { border-color: rgba(96, 165, 250, 0.4); }
+    .conn-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .conn-name { font-size: 0.82rem; font-weight: 700; color: #f3f4f6; display: flex; align-items: center; gap: 8px; }
+    .conn-type { font-size: 0.65rem; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #9ca3af; font-family: monospace; }
+    .conn-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-green { background: #10b981; box-shadow: 0 0 8px #10b981; animation: pulse-green 2s infinite; }
+    .dot-yellow { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+    .dot-red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+    @keyframes pulse-green { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }
+    .conn-rtt { font-size: 1.35rem; font-weight: 800; font-family: monospace; }
+    .conn-info { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; display: flex; justify-content: space-between; }
+    .conn-endpoint { font-size: 0.7rem; font-family: monospace; color: #60a5fa; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   </style>
 </head>
 <body>
@@ -118,6 +134,15 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
         已结算: <b id="stat-settled">0</b> 局 | 命中: <b id="stat-correct">0</b> | 跳过: <b id="stat-skipped">0</b>
       </div>
     </div>
+  </div>
+
+  <!-- 核心连接链路实时健康矩阵 -->
+  <div style="margin-bottom: 10px; font-size: 0.82rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: space-between;">
+    <span>⚡ 核心量化连接链路实时健康矩阵 (Connection Health Matrix)</span>
+    <span style="font-size: 0.72rem; color: #6b7280; text-transform: none;">自动毫秒级心跳检测</span>
+  </div>
+  <div class="conn-grid" id="conn-matrix">
+    <div style="color: var(--text-muted); font-size: 0.8rem; padding: 10px;">正在检测各节点连接链路...</div>
   </div>
 
   <!-- 第二排：当前场次实时判定 + 评分细分 -->
@@ -265,6 +290,44 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
         document.getElementById('stat-settled').innerText = st.settled_rounds;
         document.getElementById('stat-correct').innerText = st.correct;
         document.getElementById('stat-skipped').innerText = st.skipped;
+
+        // 渲染核心连接链路实时健康矩阵
+        const conns = data.connections || [];
+        if (conns.length > 0) {
+          let cHtml = '';
+          for (const c of conns) {
+            let dotClass = 'dot-green';
+            let rttColor = '#10b981';
+            if (c.status === 'DISCONNECTED' || c.status === 'UNREACHABLE') {
+              dotClass = 'dot-red';
+              rttColor = '#ef4444';
+            } else if (c.status === 'HIGH_LATENCY' || c.status === 'UNREADY' || c.status === 'DRIFTING' || c.status === 'CONNECTING') {
+              dotClass = 'dot-yellow';
+              rttColor = '#f59e0b';
+            }
+            const rttStr = c.rtt_ms > 0 ? c.rtt_ms.toFixed(1) + ' ms' : (c.id === 'clock_sync' ? c.rtt_ms.toFixed(1) + ' ms' : '-- ms');
+            cHtml += `
+            <div class="conn-card">
+              <div class="conn-top">
+                <div class="conn-name">
+                  <span class="conn-dot ${dotClass}"></span>
+                  <span>${c.name}</span>
+                </div>
+                <span class="conn-type">${c.type}</span>
+              </div>
+              <div style="display:flex; justify-content:space-between; align-items:baseline; margin-top:2px;">
+                <div class="conn-rtt" style="color:${rttColor};">${rttStr}</div>
+                <div style="font-size:0.75rem; font-weight:600; color:${rttColor};">${c.status_text}</div>
+              </div>
+              <div class="conn-endpoint" title="${c.endpoint}">🌐 ${c.endpoint}</div>
+              <div class="conn-info">
+                <span>${c.detail}</span>
+                <span>${c.sub_detail}</span>
+              </div>
+            </div>`;
+          }
+          document.getElementById('conn-matrix').innerHTML = cHtml;
+        }
 
         // 系统与连接
         document.getElementById('sys-uptime').innerText = data.system.uptime_str;

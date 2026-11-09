@@ -44,14 +44,64 @@ class AppContext:
   def get_full_status(self) -> dict:
     feed_stats = self.feed.get_stats()
     feed_stats["binance_price"] = round(self.candles.last_price, 2)
+    sys_stats = self.monitor.get_stats()
+    cl_stats = self.chainlink.get_state()
+
+    connections = [
+        {
+            "id": "binance_ws",
+            "name": "Binance 现货行情专线",
+            "type": "WebSocket (wss)",
+            "endpoint": feed_stats.get("endpoint", "stream.binance.com:9443"),
+            "status": "HEALTHY" if feed_stats.get("connected") else "DISCONNECTED",
+            "status_text": "已连接 (稳定)" if feed_stats.get("connected") else "断开重连中",
+            "rtt_ms": feed_stats.get("ping_rtt_ms", 0.0),
+            "detail": f"{feed_stats.get('msg_rate', 0)} msg/s ({feed_stats.get('byte_rate_kb', 0)} KB/s)",
+            "sub_detail": f"重连: {feed_stats.get('reconnect_count', 0)} 次 | 累计: {feed_stats.get('msg_total', 0)} 帧"
+        },
+        {
+            "id": "chainlink_rpc",
+            "name": "Chainlink 结算预言机",
+            "type": "JSON-RPC (eth_call)",
+            "endpoint": cl_stats.get("rpc_host") or "1rpc.io/matic",
+            "status": "HEALTHY" if cl_stats.get("price", 0) > 0 else "UNREADY",
+            "status_text": "数据正常" if cl_stats.get("price", 0) > 0 else "等待同步",
+            "rtt_ms": cl_stats.get("rpc_rtt_ms", 0.0),
+            "detail": f"链上延时: {cl_stats.get('age_sec', 0)}s",
+            "sub_detail": f"读取成功: {cl_stats.get('fetch_count', 0)} 次 | 错误: {cl_stats.get('error_count', 0)}"
+        },
+        {
+            "id": "polymarket_clob",
+            "name": "Polymarket 撮合引擎",
+            "type": "TLS / CLOB Gateway",
+            "endpoint": "ws-subscriptions-clob.polymarket.com",
+            "status": sys_stats.get("clob_status", "CONNECTING"),
+            "status_text": "链路极佳" if sys_stats.get("clob_status") == "HEALTHY" else ("延迟偏高" if sys_stats.get("clob_status") == "HIGH_LATENCY" else "探测中"),
+            "rtt_ms": sys_stats.get("clob_rtt_ms", 0.0),
+            "detail": "443 极速通道",
+            "sub_detail": "CLOB 订单簿订阅端点"
+        },
+        {
+            "id": "clock_sync",
+            "name": "交易所原子钟校准",
+            "type": "HTTP NTP Sync",
+            "endpoint": "data-api.binance.vision",
+            "status": sys_stats.get("clock_status", "SYNCED"),
+            "status_text": "毫秒级同步" if sys_stats.get("clock_status") == "SYNCED" else "时钟漂移警告",
+            "rtt_ms": abs(sys_stats.get("clock_offset_ms", 0.0)),
+            "detail": f"偏移: {sys_stats.get('clock_offset_ms', 0):+.2f} ms",
+            "sub_detail": "防时间漂移拒单"
+        }
+    ]
 
     return {
         "current_round": self.rounds.get_current(),
         "stats": self.rounds.get_stats(),
         "history": self.rounds.get_history(limit=50),
-        "system": self.monitor.get_stats(),
+        "system": sys_stats,
         "feed_stats": feed_stats,
-        "chainlink": self.chainlink.get_state(),
+        "chainlink": cl_stats,
+        "connections": connections,
         "server_time": time.time(),
     }
 

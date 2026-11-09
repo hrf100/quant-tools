@@ -78,6 +78,9 @@ class BinanceFeed:
         self.reconnect_count  = 0
         self.msg_total        = 0
         self.bytes_total      = 0
+        self.ping_rtt_ms      = 0.0
+        self._last_ping_ts    = 0.0
+        self.endpoint         = f"{BINANCE_WS_HOST}:{BINANCE_WS_PORT}"
         self._stat_lock       = threading.Lock()
         # 速率计算（1秒窗口）
         self._rate_msgs_buf   = []   # (timestamp,)
@@ -101,11 +104,13 @@ class BinanceFeed:
         uptime = time.time() - self.connect_time if self.connected else 0
         return {
             "connected":       self.connected,
+            "endpoint":        self.endpoint,
             "reconnect_count": self.reconnect_count,
             "msg_total":       self.msg_total,
             "bytes_total":     self.bytes_total,
             "msg_rate":        round(self.msg_rate, 1),
             "byte_rate_kb":    round(self.byte_rate / 1024, 2),
+            "ping_rtt_ms":     self.ping_rtt_ms,
             "uptime_s":        round(uptime, 0),
         }
 
@@ -166,6 +171,9 @@ class BinanceFeed:
                 frag_buf += payload
             elif opcode == 0x09:                   # Ping
                 _send_frame(sock, 0x0A, payload)   # Pong
+            elif opcode == 0x0A:                   # Pong
+                if self._last_ping_ts > 0:
+                    self.ping_rtt_ms = round((time.perf_counter() - self._last_ping_ts) * 1000, 1)
             elif opcode == 0x08:                   # Close
                 break
 
@@ -187,11 +195,12 @@ class BinanceFeed:
 
     def _ping_loop(self, sock):
         while self._running and self.connected:
-            time.sleep(20)
             try:
+                self._last_ping_ts = time.perf_counter()
                 _send_frame(sock, 0x09)
             except Exception:
                 break
+            time.sleep(10)
 
     def _update_rates(self):
         now    = time.time()

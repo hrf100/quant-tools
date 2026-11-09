@@ -11,6 +11,11 @@ import os
 import platform
 import subprocess
 import time
+import socket
+import ssl
+import json
+import http.client
+import threading
 
 OS = platform.system()
 
@@ -22,7 +27,55 @@ class SystemMonitor:
         self._last_bytes_out = 0
         self.net_in_rate_kb = 0.0
         self.net_out_rate_kb = 0.0
+        
+        # 外部链路健康状态
+        self.clob_rtt_ms = 0.0
+        self.clob_status = "CONNECTING"
+        self.clock_offset_ms = 0.0
+        self.clock_status = "SYNCED"
+        
         self._init_net_stats()
+        self._start_probe_loop()
+
+    def _start_probe_loop(self):
+        t = threading.Thread(target=self._probe_external_links, daemon=True)
+        t.start()
+
+    def _probe_external_links(self):
+        while True:
+            # 1. 探测 Polymarket CLOB 接入点延迟
+            try:
+                ctx = ssl.create_default_context()
+                host = "ws-subscriptions-clob.polymarket.com"
+                t0 = time.perf_counter()
+                s = socket.create_connection((host, 443), timeout=3)
+                ss = ctx.wrap_socket(s, server_hostname=host)
+                rtt = (time.perf_counter() - t0) * 1000
+                ss.close()
+                self.clob_rtt_ms = round(rtt, 1)
+                self.clob_status = "HEALTHY" if rtt < 350 else "HIGH_LATENCY"
+            except Exception:
+                self.clob_rtt_ms = 0.0
+                self.clob_status = "UNREACHABLE"
+
+            # 2. 探测原子钟时钟偏移
+            try:
+                ctx = ssl.create_default_context()
+                conn = http.client.HTTPSConnection("data-api.binance.vision", 443, context=ctx, timeout=3)
+                t_send = time.time() * 1000
+                conn.request("GET", "/api/v3/time", headers={"Connection": "close"})
+                resp = conn.getresponse()
+                body = json.loads(resp.read().decode())
+                t_recv = time.time() * 1000
+                server_ms = body["serverTime"]
+                conn.close()
+                offset = server_ms - ((t_send + t_recv) / 2.0)
+                self.clock_offset_ms = round(offset, 2)
+                self.clock_status = "SYNCED" if abs(offset) < 20 else "DRIFTING"
+            except Exception:
+                pass
+
+            time.sleep(15)
 
     def _init_net_stats(self):
         in_b, out_b = self._get_raw_net_bytes()
@@ -140,5 +193,9 @@ class SystemMonitor:
             "uptime_str": uptime_str,
             "net_in_rate_kb": self.net_in_rate_kb,
             "net_out_rate_kb": self.net_out_rate_kb,
+            "clob_rtt_ms": self.clob_rtt_ms,
+            "clob_status": self.clob_status,
+            "clock_offset_ms": self.clock_offset_ms,
+            "clock_status": self.clock_status,
             **cpu_mem
         }
