@@ -90,9 +90,22 @@ class CandleEngine:
         return sum(prices) / len(prices) if prices else 0.0
 
     def get_prices_since(self, since_ts: float) -> list[tuple[float, float]]:
-        """返回 since_ts 之后的 (timestamp, price) 列表（用于微斜率计算）。"""
+        """返回 since_ts 之后的 (timestamp, price) 列表。"""
         with self._lock:
             return [(t, p) for t, p in self._price_buf if t >= since_ts]
+
+    def get_prices_between(self, start_ts: float, end_ts: float) -> list[tuple[float, float]]:
+        """返回 [start_ts, end_ts) 内的成交。end_ts 排除，避免吃进开场后的第一笔。"""
+        with self._lock:
+            return [(t, p) for t, p in self._price_buf if start_ts <= t < end_ts]
+
+    def last_price_before(self, ts: float) -> float:
+        """返回 ts 之前的最后一笔价格。没有则返回 0。"""
+        with self._lock:
+            for t, p in reversed(self._price_buf):
+                if t < ts:
+                    return p
+        return 0.0
 
     # ── 内部方法 ─────────────────────────────────────────────────────────────────
 

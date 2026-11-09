@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+quant_auth.db
+.env
+.env.*

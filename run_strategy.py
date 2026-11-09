@@ -15,12 +15,15 @@ import signal
 import sys
 import time
 
+from btc_strategy.auth_store import AuthStore
 from btc_strategy.binance_feed import BinanceFeed
 from btc_strategy.candle_engine import CandleEngine
 from btc_strategy.chainlink_poller import ChainlinkPoller
 from btc_strategy.config import WEB_HOST, WEB_PORT
+from btc_strategy.polymarket_service import PolymarketService
 from btc_strategy.round_manager import RoundManager
 from btc_strategy.system_monitor import SystemMonitor
+from btc_strategy.traffic_stats import TrafficStats
 from btc_strategy.web_server import WebDashboardServer
 
 GREEN = "\033[92m"
@@ -34,12 +37,13 @@ BOLD = "\033[1m"
 
 class AppContext:
 
-  def __init__(self, candles, feed, chainlink, rounds, monitor):
+  def __init__(self, candles, feed, chainlink, rounds, monitor, traffic):
     self.candles = candles
     self.feed = feed
     self.chainlink = chainlink
     self.rounds = rounds
     self.monitor = monitor
+    self.traffic = traffic
 
   def get_full_status(self) -> dict:
     feed_stats = self.feed.get_stats()
@@ -96,14 +100,27 @@ class AppContext:
 
     return {
         "current_round": self.rounds.get_current(),
+        "upcoming_round": self.rounds.get_upcoming(),
         "stats": self.rounds.get_stats(),
-        "history": self.rounds.get_history(limit=50),
+        "history": self._history_with_current(),
         "system": sys_stats,
         "feed_stats": feed_stats,
         "chainlink": cl_stats,
         "connections": connections,
+        "traffic": self.traffic.snapshot(feed_stats.get("bytes_total", 0)),
         "server_time": time.time(),
     }
+
+  def _history_with_current(self) -> list:
+    """历史列表顶部带上尚未结算的当前场次。"""
+    history = self.rounds.get_history(limit=50)
+    current = self.rounds.get_current()
+    open_ts = current.get("open_ts")
+    if not open_ts or any(row.get("open_ts") == open_ts for row in history):
+      return history
+    live = dict(current)
+    live["live"] = True
+    return [live] + history
 
 
 def get_public_ip():
@@ -129,8 +146,8 @@ def print_banner(port: int):
       " (eth_call)"
   )
   print(
-      f"  • {BOLD}信号决策算法模型{RESET} : 三层融合评分 (1h趋势 + 5m结构动能 +"
-      " 开盘微观斜率)"
+      f"  • {BOLD}信号决策算法模型{RESET} : 开场前锁定 (1h趋势 + 已收盘5m +"
+      " 开场前斜率)"
   )
   print(
       f"  • {BOLD}Web 决策监控面板{RESET}   : {GREEN}{BOLD}http://{pub_ip}:{port}{RESET}"
@@ -159,8 +176,11 @@ def main():
   rounds = RoundManager(candle_engine=candles, chainlink_poller=chainlink)
   monitor = SystemMonitor(start_time=start_ts)
 
-  app_ctx = AppContext(candles, feed, chainlink, rounds, monitor)
-  web_server = WebDashboardServer(args.host, args.port, app_ctx)
+  traffic = TrafficStats()
+  auth = AuthStore()
+  polymarket = PolymarketService()
+  app_ctx = AppContext(candles, feed, chainlink, rounds, monitor, traffic)
+  web_server = WebDashboardServer(args.host, args.port, app_ctx, auth, traffic, polymarket)
 
   print_banner(args.port)
 
@@ -191,12 +211,15 @@ def main():
     now = time.time()
     if now - last_print_ts >= 10:
       cur = rounds.get_current()
+      up = rounds.get_upcoming()
       st = rounds.get_stats()
       bp = candles.last_price
       cp = chainlink.price
-      pred = cur.get("predicted_dir") or "WAITING"
+      pred = cur.get("predicted_dir") or "NO_CALL"
       conf = cur.get("confidence") or 0.0
       rem = cur.get("time_remaining") or 0
+      up_pred = up.get("predicted_dir") or "WAITING"
+      up_in = up.get("time_until_open") or 0
 
       pred_color = (
           GREEN
@@ -210,8 +233,9 @@ def main():
           f"BTC: ${bp:,.2f} | "
           f"Chainlink: ${cp:,.2f} | "
           f"当前场次[{cur.get('open_time_str','--')} 剩{rem_str}] "
-          f"判定: {pred_color}{BOLD}{pred}{RESET} ({conf:.1f}%) | "
-          f"总胜率: {GREEN}{st['accuracy_pct']}%{RESET} ({st['correct']}/{st['settled_rounds']})"
+          f"本场: {pred_color}{BOLD}{pred}{RESET} ({conf:.1f}%) | "
+          f"下一场: {BOLD}{up_pred}{RESET} ({up_in}s) | "
+          f"胜率: {GREEN}{st['accuracy_pct']}%{RESET} ({st['correct']}/{st['called_rounds']})"
       )
       last_print_ts = now
 

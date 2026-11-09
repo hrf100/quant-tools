@@ -20,10 +20,12 @@ CHAINLINK_POLL_INTERVAL = 3   # seconds
 CANDLE_MAX_COUNT  = 300       # 每个周期最多保留多少根蜡烛
 
 # 信号参数
-SIGNAL_THRESHOLD      = 30    # |score| 低于此值 → SKIP（满分100）
-MICRO_SLOPE_MIN_SEC   = 20    # 开盘后等20秒即开始融合微斜率信号
-TWAP_WINDOW_SEC       = 60    # 开/收盘 TWAP 采样窗口（秒）
-ROUND_DURATION_SEC    = 300   # 每局时长（5分钟）
+SIGNAL_THRESHOLD       = 30    # |score| 低于此值 → SKIP（满分100）
+PREOPEN_SLOPE_SEC      = 60    # 开场前斜率回看窗口（秒），不含开场后成交
+PREOPEN_SLOPE_MIN_SPAN = 15    # 窗口跨度短于此时不采用斜率
+PREOPEN_SLOPE_MIN_TICKS = 10   # 窗口内成交笔数少于此时不采用斜率
+TWAP_WINDOW_SEC        = 60    # 开/收盘采样窗口（秒）
+ROUND_DURATION_SEC     = 300   # 每局时长（5分钟）
 
 # Web 仪表盘
 WEB_HOST = "0.0.0.0"
@@ -31,3 +33,10 @@ WEB_PORT = 8888
 
 # 数据库
 DB_PATH = "quant_rounds.db"
+AUTH_DB_PATH = "quant_auth.db"
+
+# Polymarket
+CLOB_HOST = "https://clob.polymarket.com"
+GAMMA_HOST = "https://gamma-api.polymarket.com"
+DATA_API_HOST = "https://data-api.polymarket.com"
+POLYGON_CHAIN_ID = 137

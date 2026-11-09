@@ -1,15 +1,19 @@
 # btc_strategy/signal_engine.py
 """
-三层信号融合评分系统：
+三层信号融合评分系统，只使用开场前已经知道的数据：
   Layer 1: 宏观趋势  (1h EMA-21)        权重 ±25
-  Layer 2: 结构信号  (5m RSI + BB + K线方向)  权重 ±35
-  Layer 3: 微观斜率  (开盘后价格斜率)    权重 ±25
+  Layer 2: 结构信号  (已收盘 5m RSI + BB + 上一根 5m 方向)  权重 ±35
+  Layer 3: 微观斜率  (开场前价格斜率)    权重 ±25
   Total: ±85 → 归一化到 ±100
   |score| > SIGNAL_THRESHOLD → UP/DOWN，否则 SKIP
 """
 
 import math
-from btc_strategy.config import SIGNAL_THRESHOLD, MICRO_SLOPE_MIN_SEC
+from btc_strategy.config import (
+    PREOPEN_SLOPE_MIN_SPAN,
+    PREOPEN_SLOPE_MIN_TICKS,
+    SIGNAL_THRESHOLD,
+)
 
 
 # ── 数学工具 ──────────────────────────────────────────────────────────────────
@@ -51,15 +55,18 @@ def _bollinger(closes: list[float], n: int = 20, k: float = 2.0):
     return ma + k * std, ma, ma - k * std
 
 
-def _linear_slope(prices: list[float]) -> float:
-    """最小二乘线性斜率（USD/tick，tick 均匀分布假设）。"""
-    n = len(prices)
+def _linear_slope_per_sec(points: list[tuple[float, float]]) -> float:
+    """价格对时间的最小二乘斜率，单位 USD/秒。"""
+    n = len(points)
     if n < 2:
         return 0.0
-    mx = (n - 1) / 2.0
-    my = sum(prices) / n
-    num   = sum((i - mx) * (p - my) for i, p in enumerate(prices))
-    denom = sum((i - mx) ** 2 for i in range(n))
+    t0 = points[0][0]
+    xs = [t - t0 for t, _ in points]
+    ys = [p for _, p in points]
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    denom = sum((x - mx) ** 2 for x in xs)
     return num / denom if denom else 0.0
 
 
@@ -69,12 +76,10 @@ class SignalEngine:
 
     def compute(
         self,
-        candles_1m:  list[dict],
         candles_5m:  list[dict],
         candles_1h:  list[dict],
         current_price: float,
-        seconds_since_open: float,
-        prices_since_open: list[tuple[float, float]],  # (ts, price)
+        prices_before_open: list[tuple[float, float]],  # (ts, price)，全部早于开场
     ) -> dict:
         """
         返回:
@@ -82,6 +87,7 @@ class SignalEngine:
           score        : float，-100 ~ +100（正值偏UP）
           confidence   : float，0~100
           breakdown    : dict，各层得分明细
+        调用方必须保证 K 线收盘价和价格序列都不含本局开场后的成交。
         """
         breakdown = {}
         raw_score = 0.0
@@ -109,8 +115,8 @@ class SignalEngine:
         breakdown["momentum"] = mom_score
         raw_score += mom_score
 
-        # ── Layer 3: 微观价格斜率（±25，T₀+30s 后才计算）────────────────────────
-        micro, slope_usd_s = self._layer_micro(seconds_since_open, prices_since_open)
+        # ── Layer 3: 开场前微观斜率（±25）─────────────────────────────────────
+        micro, slope_usd_s = self._layer_micro(prices_before_open)
         breakdown["micro"]       = round(micro, 1)
         breakdown["slope_usd_s"] = round(slope_usd_s, 3)
         raw_score += micro
@@ -189,16 +195,14 @@ class SignalEngine:
 
     def _layer_micro(
         self,
-        seconds_since_open: float,
-        prices_since_open: list[tuple[float, float]],
+        prices_before_open: list[tuple[float, float]],
     ) -> tuple[float, float]:
-        if seconds_since_open < MICRO_SLOPE_MIN_SEC or len(prices_since_open) < 10:
+        if len(prices_before_open) < PREOPEN_SLOPE_MIN_TICKS:
             return 0.0, 0.0
-        prices    = [p for _, p in prices_since_open]
-        # tick_slope: USD per tick
-        tick_slope = _linear_slope(prices)
-        # 转换为 USD/second（假设 ~10 ticks/second on Binance aggTrade）
-        slope_usd_s = tick_slope * 10.0
-        # 缩放：0.5 USD/s → ±25 分（BTC $70k 时，0.5/s ≈ 0.04%/s，属强趋势）
+        span = prices_before_open[-1][0] - prices_before_open[0][0]
+        if span < PREOPEN_SLOPE_MIN_SPAN:
+            return 0.0, 0.0
+        slope_usd_s = _linear_slope_per_sec(prices_before_open)
+        # 0.5 USD/s → ±25 分
         micro = max(-25.0, min(25.0, slope_usd_s * 50.0))
         return micro, slope_usd_s

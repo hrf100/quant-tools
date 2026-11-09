@@ -5,7 +5,7 @@
 1. **全链路网络/节点体检工具** (`quant_master_diagnostics.py`)
 2. **BTC 5m 涨跌实时方向预测策略引擎 & Web 监控面板** (`run_strategy.py`)
 
-**零外部第三方依赖，纯 Python 3.8+ 标准库实现，任何 Linux/Mac/Windows 服务器开箱即用！**
+**Python 3.10+。** 看板用标准库即可运行；连接钱包和下单前先安装 `requirements.txt`。
 
 ---
 
@@ -14,7 +14,13 @@
 只需在服务器终端执行以下命令（自动拉取最新代码并运行）：
 
 ```bash
-git clone https://github.com/hrf100/quant-tools.git && cd quant-tools && python3 run_strategy.py
+git clone https://github.com/hrf100/quant-tools.git && cd quant-tools && python3 -m pip install -r requirements.txt && python3 run_strategy.py
+```
+
+已经克隆过的目录，一行更新：
+
+```bash
+git pull && python3 -m pip install -r requirements.txt && python3 run_strategy.py
 ```
 
 若希望在后台持久运行（即使关闭 SSH 终端也不中断）：
