@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import time
+from decimal import Decimal
 import threading
 import unittest
 import urllib.error
@@ -90,6 +92,38 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(body["connected"])
         for key in ("signer_key", "api_key", "api_secret", "api_passphrase", "private_key"):
             self.assertNotIn(key, body)
+
+    def test_quick_buy_uses_one_dollar_not_five_shares(self):
+        class _Order:
+            ok = True
+            order_id = "abc"
+            message = ""
+
+        class _Client:
+            def __init__(self):
+                self.kwargs = None
+
+            def place_market_order(self, **kwargs):
+                self.kwargs = kwargs
+                return _Order()
+
+        client = _Client()
+        self.poly._client = client
+        self.poly._restore_tried = True
+        open_ts = int(time.time()) // 300 * 300
+        self.poly._book_cache = (open_ts, time.time(), {
+            "ready": True,
+            "up": {"token_id": "yes", "tick_size": "0.01", "min_order_size": "5"},
+            "down": {"token_id": "no", "tick_size": "0.01", "min_order_size": "5"},
+        })
+        result = self.poly.place_order(b"k" * 32, "UP", "0.32", "1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.kwargs["amount"], Decimal("1.00"))
+        self.assertEqual(client.kwargs["max_price"], Decimal("0.32"))
+        self.assertEqual(client.kwargs["order_type"], "FAK")
+        with self.assertRaises(RuntimeError) as caught:
+            self.poly.place_order(b"k" * 32, "UP", "0.32", "0.50")
+        self.assertIn("1 pUSD", str(caught.exception))
 
     def test_private_key_shape(self):
         key = "0x" + "11" * 32

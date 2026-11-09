@@ -1,4 +1,4 @@
-"""Polymarket 账户、盘口和限价下单。私钥只加密落在本地。"""
+"""Polymarket 账户、盘口和按金额买入。私钥只加密落在本地。"""
 
 import json
 import sqlite3
@@ -12,6 +12,7 @@ from eth_account import Account
 from btc_strategy.config import AUTH_DB_PATH
 
 _BASE = Decimal("1000000")
+_MIN_MARKET_BUY = Decimal("1")
 
 
 class PolymarketService:
@@ -192,10 +193,12 @@ class PolymarketService:
         side = (side or "").upper()
         if side not in ("UP", "DOWN"):
             raise RuntimeError("方向只能是 UP 或 DOWN")
-        amount = Decimal(str(amount))
+        amount = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         price = Decimal(str(price))
         if amount <= 0:
             raise RuntimeError("下单金额要大于 0")
+        if amount < _MIN_MARKET_BUY:
+            raise RuntimeError(f"金额 {amount} 低于最小下单金额 {_MIN_MARKET_BUY} pUSD")
         if price <= 0 or price >= 1:
             raise RuntimeError("价格要在 0 和 1 之间")
 
@@ -205,26 +208,24 @@ class PolymarketService:
             raise RuntimeError(market.get("error") or "盘口还没准备好")
         leg = market["up"] if side == "UP" else market["down"]
         tick = Decimal(str(leg.get("tick_size") or "0.01"))
-        min_size = Decimal(str(leg.get("min_order_size") or "1"))
         price = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
         if price <= 0 or price >= 1:
             raise RuntimeError("价格不在可下单区间")
         shares = (amount / price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-        if shares < min_size:
-            raise RuntimeError(f"份额 {shares} 低于最小下单量 {min_size}")
 
-        result = client.place_limit_order(
+        result = client.place_market_order(
             token_id=leg["token_id"],
-            price=price,
-            size=shares,
             side="BUY",
+            amount=amount,
+            max_price=price,
+            order_type="FAK",
         )
         if not getattr(result, "ok", False):
             message = getattr(result, "message", None) or "下单被拒绝"
             self._push_order(False, side, price, shares, amount, message)
             raise RuntimeError(message)
         order_id = getattr(result, "order_id", "")
-        message = f"已提交 {side} 买单，价格 {price}，份额 {shares}，金额约 {amount} pUSD"
+        message = f"已提交 {side} 买单，最高价 {price}，金额 {amount} pUSD，约 {shares} 份"
         self._push_order(True, side, price, shares, amount, message, order_id)
         self._view_cache = None
         return {"ok": True, "message": message, "order_id": order_id}
