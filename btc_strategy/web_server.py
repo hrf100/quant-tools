@@ -288,7 +288,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
         const cur = data.current_round;
         document.getElementById('round-phase').innerText = cur.phase || 'WAITING';
         document.getElementById('round-time-str').innerText = cur.open_time_str || '--:--';
-        document.getElementById('open-twap').innerText = cur.opening_price ? '$ ' + cur.opening_price.toFixed(2) : '$ --';
+        document.getElementById('open-twap').innerText = cur.opening_price > 0 ? '$ ' + cur.opening_price.toFixed(2) : (bp > 0 ? '$ ' + bp.toFixed(2) + ' (采样中)' : '$ --');
 
         const rem = cur.time_remaining || 0;
         const mins = Math.floor(rem / 60);
@@ -356,6 +356,8 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
             </tr>`;
           }
           document.getElementById('history-rows').innerHTML = html;
+        } else {
+          document.getElementById('history-rows').innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted); padding: 24px;">暂无历史结算场次（首局正在进行中，本局 5 分钟倒计时结束后将自动归档并展示准确率）</td></tr>';
         }
 
       } catch (err) {

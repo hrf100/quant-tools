@@ -56,7 +56,17 @@ class AppContext:
     }
 
 
+def get_public_ip():
+  try:
+    import urllib.request
+    req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "curl/7.68.0"})
+    with urllib.request.urlopen(req, timeout=2) as resp:
+      return resp.read().decode().strip()
+  except Exception:
+    return "你的服务器公网IP"
+
 def print_banner(port: int):
+  pub_ip = get_public_ip()
   print(f"\n{BOLD}{CYAN}{'='*80}{RESET}")
   print(f"{BOLD}  ⚡ POLYMARKET BTC 5M 涨跌量化决策引擎 & 实时 WEB 监控中心{RESET}")
   print(f"{BOLD}{CYAN}{'='*80}{RESET}")
@@ -73,7 +83,7 @@ def print_banner(port: int):
       " 开盘微观斜率)"
   )
   print(
-      f"  • {BOLD}Web 决策监控面板{RESET}   : {GREEN}{BOLD}http://0.0.0.0:{port}{RESET}"
+      f"  • {BOLD}Web 决策监控面板{RESET}   : {GREEN}{BOLD}http://{pub_ip}:{port}{RESET}"
       f" (浏览器直接打开)"
   )
   print(f"{BOLD}{CYAN}{'='*80}{RESET}\n")

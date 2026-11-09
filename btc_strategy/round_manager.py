@@ -3,11 +3,10 @@
 管理 Polymarket BTC 5分钟涨跌每一局的完整生命周期。
 
 时间轴（以局开始时刻 T₀ 为基准）：
-  T₀-60s : 开始采样开盘 TWAP 基准
-  T₀     : 本局正式开始，开盘 TWAP 锁定
-  T₀+30s : 计算信号，作出方向预测
-  T₀+240s: 开始采样收盘 TWAP
-  T₀+300s: 本局结束，收盘 TWAP 锁定，判断实际方向，写入数据库
+  T₀     : 本局开始，锁定开盘 TWAP 基准
+  T₀+0s~: 实时结合宏观趋势 + RSI 计算前瞻方向
+  T₀+20s~: 融合开盘后微观价格斜率，精细化方向与置信度
+  T₀+300s: 本局到期，锁定收盘 TWAP，自动判定胜负并写入 SQLite
 """
 
 import sqlite3
@@ -68,32 +67,25 @@ class RoundManager:
         with self._lock:
             hist = self.history
         total    = len([r for r in hist if r.get("actual_dir")])
-        correct  = len([r for r in hist if r.get("is_correct")])
+        correct  = len([r for r in hist if r.get("is_correct") == 1 or r.get("is_correct") is True])
         skipped  = len([r for r in hist if r.get("predicted_dir") == "SKIP"])
         accuracy = round(correct / total * 100, 1) if total > 0 else 0.0
-        # 连胜/连败
+        
         streak = 0; streak_type = ""
         for r in reversed(hist):
             if r.get("actual_dir") is None:
                 continue
             if r.get("predicted_dir") == "SKIP":
-                break
-            if r.get("is_correct"):
-                if streak_type == "W": streak += 1
-                else: streak = 1; streak_type = "W"
+                continue
+            is_c = (r.get("is_correct") == 1 or r.get("is_correct") is True)
+            if streak == 0:
+                streak_type = "W" if is_c else "L"
+                streak = 1
             else:
-                if streak_type == "L": streak += 1
-                else: streak = 1; streak_type = "L"
-            break
-        # 继续统计连续
-        for r in reversed(hist[:-1]):
-            if r.get("actual_dir") is None or r.get("predicted_dir") == "SKIP":
-                break
-            if (r.get("is_correct") and streak_type == "W") or \
-               (not r.get("is_correct") and streak_type == "L"):
-                streak += 1
-            else:
-                break
+                if (is_c and streak_type == "W") or (not is_c and streak_type == "L"):
+                    streak += 1
+                else:
+                    break
         return {
             "total_rounds":    len(hist),
             "settled_rounds":  total,
@@ -113,36 +105,34 @@ class RoundManager:
             close_ts  = open_ts + ROUND_DURATION_SEC
             elapsed   = now - open_ts
 
-            # 初始化当前局（如果还没）
+            # 局切换检测
             with self._lock:
                 if self.current.get("open_ts") != open_ts:
+                    # 如果上一局还在，先结算上一局
+                    prev_open = self.current.get("open_ts")
+                    if prev_open and prev_open != open_ts and self.current.get("phase") != "SETTLED":
+                        self._settle_round_internal(prev_open)
                     self._init_round(open_ts)
 
-            # 状态机
-            if elapsed < 0:
-                pass  # 不应发生
-            elif elapsed < TWAP_WINDOW_SEC:
-                # 阶段1：采样开盘 TWAP（T₀-60s ~ T₀，此时正好在上一局最后60秒）
-                self._update_current("phase", "SAMPLING_OPEN")
-            elif elapsed < 30:
-                # 阶段2：等待微斜率数据（T₀ ~ T₀+30s）
-                self._update_current("phase", "AWAITING_MICRO")
-            elif elapsed < ROUND_DURATION_SEC - TWAP_WINDOW_SEC:
-                # 阶段3：信号已计算（或计算中）
-                self._ensure_signal_computed(open_ts)
-                self._update_current("phase", "ACTIVE")
-            elif elapsed < ROUND_DURATION_SEC:
-                # 阶段4：采样收盘 TWAP
-                self._ensure_signal_computed(open_ts)
-                self._update_current("phase", "SAMPLING_CLOSE")
-            else:
-                # 阶段5：本局结束，结算
-                self._settle_round(open_ts)
+            # 确保开盘基准价已建立
+            self._ensure_opening_price(open_ts)
 
-            # 更新实时倒计时
-            self._update_current("time_remaining", max(0, int(close_ts - time.time())))
-            self._update_current("elapsed", int(elapsed))
-            self._update_current("chainlink_price", self._chainlink.price)
+            # 动态计算和更新信号
+            self._update_live_signal(open_ts, elapsed)
+
+            # 阶段判定
+            if elapsed < 20:
+                phase = "SAMPLING_MICRO"
+            elif elapsed < ROUND_DURATION_SEC - TWAP_WINDOW_SEC:
+                phase = "ACTIVE"
+            else:
+                phase = "SETTLEMENT_WINDOW"
+
+            with self._lock:
+                self.current["phase"] = phase
+                self.current["time_remaining"] = max(0, int(close_ts - time.time()))
+                self.current["elapsed"] = int(elapsed)
+                self.current["chainlink_price"] = self._chainlink.price
 
             time.sleep(1)
 
@@ -163,41 +153,43 @@ class RoundManager:
             "elapsed":        0,
             "signal_computed":False,
         }
-        # 预写数据库行
         self._db_insert_round(open_ts)
 
-    def _update_current(self, key: str, value):
+    def _ensure_opening_price(self, open_ts: int):
+        """确保开盘基准价有效，绝不出现 0.0"""
         with self._lock:
-            if key in self.current:
-                self.current[key] = value
-
-    def _ensure_signal_computed(self, open_ts: int):
-        with self._lock:
-            if self.current.get("signal_computed"):
+            cur_op = self.current.get("opening_price", 0.0)
+            if cur_op > 0:
                 return
 
-        # 计算开盘 TWAP（上一局最后60秒 ~ 本局开始）
-        opening_price = self._candles.get_twap(open_ts - TWAP_WINDOW_SEC, open_ts)
-        if opening_price == 0.0:
-            opening_price = self._candles.last_price
+        twap = self._candles.get_twap(open_ts - TWAP_WINDOW_SEC, open_ts)
+        if twap <= 0:
+            twap = self._candles.last_price
 
-        # 获取微斜率数据（开盘后价格）
+        cl_p = self._chainlink.price
+
+        if twap > 0:
+            with self._lock:
+                self.current["opening_price"] = round(twap, 2)
+                self.current["chainlink_open"] = round(cl_p, 2)
+
+    def _update_live_signal(self, open_ts: int, elapsed: float):
+        """实时更新当前信号得分"""
+        last_p = self._candles.last_price
+        if last_p <= 0:
+            return
+
         prices_since = self._candles.get_prices_since(open_ts)
-
-        # 信号计算
         c1m = self._candles.get_candles("1m", 60)
         c5m = self._candles.get_candles("5m", 50)
         c1h = self._candles.get_candles("1h", 48)
-        elapsed = time.time() - open_ts
 
         result = self._signal.compute(
             c1m, c5m, c1h,
-            self._candles.last_price,
+            last_p,
             elapsed,
             prices_since,
         )
-
-        cl_price = self._chainlink.price
 
         with self._lock:
             self.current.update({
@@ -206,50 +198,40 @@ class RoundManager:
                 "confidence":      result["confidence"],
                 "score":           result["score"],
                 "breakdown":       result["breakdown"],
-                "opening_price":   round(opening_price, 2),
-                "chainlink_open":  round(cl_price, 2),
             })
 
-        # 写入数据库
-        self._db_update_signal(open_ts, result, opening_price, cl_price)
-
-    def _settle_round(self, open_ts: int):
-        """计算结果并写入数据库，然后归档到历史。"""
-        with self._lock:
-            if self.current.get("phase") == "SETTLED":
-                return
-            self.current["phase"] = "SETTLED"
-            round_snapshot = dict(self.current)
-
-        close_ts     = open_ts + ROUND_DURATION_SEC
+    def _settle_round_internal(self, open_ts: int):
+        """结算指定的一局"""
+        close_ts = open_ts + ROUND_DURATION_SEC
         closing_price = self._candles.get_twap(close_ts - TWAP_WINDOW_SEC, close_ts)
-        if closing_price == 0.0:
+        if closing_price <= 0:
             closing_price = self._candles.last_price
 
-        opening_price = round_snapshot.get("opening_price", 0.0) or self._candles.last_price
-        actual_dir    = "UP" if closing_price >= opening_price else "DOWN"
-        predicted     = round_snapshot.get("predicted_dir")
-        is_correct    = None
+        opening_price = self.current.get("opening_price", 0.0) or closing_price
+        actual_dir = "UP" if closing_price >= opening_price else "DOWN"
+        predicted = self.current.get("predicted_dir")
+        
+        is_correct = None
         if predicted and predicted != "SKIP":
             is_correct = (predicted == actual_dir)
 
         cl_close = self._chainlink.price
 
-        # 写数据库
         self._db_settle(open_ts, closing_price, cl_close, actual_dir, is_correct)
 
-        # 归档历史
-        record = {**round_snapshot,
-                  "closing_price": round(closing_price, 2),
-                  "chainlink_close": round(cl_close, 2),
-                  "actual_dir":    actual_dir,
-                  "is_correct":    is_correct}
-        with self._lock:
-            self.history.append(record)
-            if len(self.history) > 200:
-                self.history = self.history[-200:]
+        record = {
+            **self.current,
+            "closing_price": round(closing_price, 2),
+            "chainlink_close": round(cl_close, 2),
+            "actual_dir": actual_dir,
+            "is_correct": is_correct,
+            "phase": "SETTLED"
+        }
+        self.history.append(record)
+        if len(self.history) > 200:
+            self.history = self.history[-200:]
 
-    # ── 数据库 ───────────────────────────────────────────────────────────────
+    # ── 数据库持久化 ──────────────────────────────────────────────────────────
 
     def _db_init(self):
         con = sqlite3.connect(DB_PATH)
@@ -274,9 +256,8 @@ class RoundManager:
             )
         """)
         con.commit()
-        # 加载最近 200 局到内存
         rows = con.execute(
-            "SELECT * FROM rounds ORDER BY open_ts DESC LIMIT 200"
+            "SELECT * FROM rounds WHERE actual_dir IS NOT NULL ORDER BY open_ts DESC LIMIT 200"
         ).fetchall()
         cols = [d[0] for d in con.execute("PRAGMA table_info(rounds)").fetchall()]
         con.close()
@@ -289,24 +270,6 @@ class RoundManager:
             con.execute(
                 "INSERT OR IGNORE INTO rounds (open_ts, created_at) VALUES (?, ?)",
                 (open_ts, _now_ms()))
-            con.commit(); con.close()
-        except Exception: pass
-
-    def _db_update_signal(self, open_ts: int, result: dict, opening_price: float, cl_open: float):
-        try:
-            bd  = result.get("breakdown", {})
-            con = sqlite3.connect(DB_PATH)
-            con.execute("""
-                UPDATE rounds SET
-                    predicted_dir=?, confidence=?, score=?,
-                    score_macro=?, score_rsi=?, score_bb=?,
-                    score_momentum=?, score_micro=?,
-                    opening_price=?, chainlink_open=?
-                WHERE open_ts=?
-            """, (result["direction"], result["confidence"], result["score"],
-                  bd.get("macro",0), bd.get("rsi",0), bd.get("bb",0),
-                  bd.get("momentum",0), bd.get("micro_slope",0),
-                  opening_price, cl_open, open_ts))
             con.commit(); con.close()
         except Exception: pass
 
