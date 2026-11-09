@@ -14,19 +14,19 @@
 只需在服务器终端执行以下命令（自动拉取最新代码并运行）：
 
 ```bash
-git clone https://github.com/hrf100/quant-tools.git && cd quant-tools && python3 -m pip install -r requirements.txt && python3 run_strategy.py
+git clone https://github.com/hrf100/quant-tools.git && cd quant-tools && bash start_strategy.sh
 ```
 
-已经克隆过的目录，一行更新：
+系统没有 pip 时，脚本会用 `sudo` 安装 `python3-venv`，再在项目里的 `.venv` 安装依赖。已经克隆过的目录，一行更新并启动：
 
 ```bash
-git pull && python3 -m pip install -r requirements.txt && python3 run_strategy.py
+git pull && bash start_strategy.sh
 ```
 
 若希望在后台持久运行（即使关闭 SSH 终端也不中断）：
 
 ```bash
-nohup python3 run_strategy.py > strategy.log 2>&1 &
+nohup bash start_strategy.sh > strategy.log 2>&1 &
 ```
 
 启动后，打开浏览器访问：
